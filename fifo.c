@@ -40,7 +40,7 @@ static int init_cdev_fifo(FIFO_t* fifo, unsigned int minor_number, struct file_o
 
 
 // * _ GLOBAL VARIABLES ________________________________________________________
-unsigned int    major_number = FIFO_MAJOR_NUMBER; 
+unsigned int    fifo_major = FIFO_MAJOR_NUMBER; 
 FIFO_t          fifos[FIFO_DEV_COUNT]; 
 
 
@@ -50,15 +50,23 @@ static int __init fifo_init(void)
     int     retval; 
     int     i; 
     
-    devno = MKDEV(major_number, 0);
+    devno = MKDEV(fifo_major, 0);
     
     // Register major number and devices. 
-    retval = alloc_chrdev_region(&devno, 0, FIFO_DEV_COUNT, "fifo"); 
+    if (fifo_major)
+        retval = register_chrdev_region(devno, FIFO_DEV_COUNT, "fifo");
+
+    else 
+        retval = alloc_chrdev_region(&devno, 0, FIFO_DEV_COUNT, "fifo");
+
     if (retval < 0)
     {
         printk("[FIFO] error while allocating MAJOR, exiting...\n"); 
         return -ENODEV; 
     }
+
+    // Save the major number. 
+    fifo_major = MAJOR(devno);
 
     printk("[FIFO] MAJOR allocation successful, MAJOR is %d.\n", MAJOR(devno)); 
  
@@ -80,7 +88,7 @@ static int __init fifo_init(void)
 
 static void __exit fifo_exit(void)
 {
-    unregister_chrdev_region(devno, FIFO_DEV_COUNT); 
+    unregister_chrdev_region(MKDEV(fifo_major, 0), FIFO_DEV_COUNT); 
     printk(KERN_INFO "[FIFO] driver unloaded successfully, goodbye!\n"); 
     return; 
 }
@@ -97,7 +105,7 @@ static int init_cdev_fifo(FIFO_t* fifo, unsigned int minor_number, struct file_o
     int     retval; 
     dev_t   dev_minor; 
 
-    dev_minor = MKDEV(major_number, minor_number); 
+    dev_minor = MKDEV(fifo_major, minor_number); 
 
     // Initialize the cdev associated to the FIFO_t structure and minor number. 
     cdev_init(fifo->cdev, fops); 
