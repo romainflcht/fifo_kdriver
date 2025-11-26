@@ -20,7 +20,8 @@ typedef struct fifo_t
 {
     struct cdev     cdev; 
     char*           buffer;
-    int             index; 
+    int             r_cur; 
+    int             w_cur; 
 }   FIFO_t; 
 
 
@@ -109,9 +110,12 @@ static void __exit fifo_exit(void)
 {
     int i; 
 
-    // Unload each devices and unregister the MAJOR. 
+    // Unload each devices, free allocated memory and unregister the MAJOR. 
     for (i = 0; i < FIFO_DEV_COUNT; i += 1)
+    {
         cdev_del(&(fifos[i].cdev)); 
+        kfree(fifos[i].buffer); 
+    } 
 
     unregister_chrdev_region(MKDEV(fifo_major, 0), FIFO_DEV_COUNT); 
     printk(KERN_INFO "[FIFO] driver unloaded successfully, goodbye!\n"); 
@@ -153,10 +157,12 @@ static int init_cdev_fifo(FIFO_t* fifo, unsigned int minor, struct file_operatio
         return -ENOMEM; 
     }
     
-    fifo->index = 127; 
+    fifo->r_cur = 0; 
+    fifo->w_cur = 0; 
 
-    for (int i = 0; i < 127; i += 1)
-        fifo->buffer[i] = i; 
+    // Fill the buffer with zeros. 
+    for (int i = 0; i < FIFO_BUFFER_SIZE; i += 1)
+        fifo->buffer[i] = 0; 
     
     printk(KERN_INFO "[FIFO] device %d is correctly registered.\n", minor);
     return 0; 
@@ -180,9 +186,12 @@ static ssize_t fifo_read(struct file* fp, char __user* buf, size_t nbc, loff_t* 
         printk(KERN_ERR "[FIFO] Trying to access an unregistered device.\n"); 
         return -ENODEV; 
     }
-    
-    // If the fifo is empty, return no character. 
-    if (fifos[minor].index < 0)
+
+    printk("[FIFO] %ld byte(s) read operation asked from MINOR %d, read_cursor currently at %d\n", nbc, minor, fifos[minor].r_cur); 
+
+    // If the read cursor is already on write cursor, read nothing. 
+    if (fifos[minor].r_cur == fifos[minor].w_cur)
+        // TODO: Block the execution, waiting for new bytes in the buffer. 
         return 0; 
     
     // Else, allocate a kernel buffer to read the fifo buffer. 
@@ -190,17 +199,23 @@ static ssize_t fifo_read(struct file* fp, char __user* buf, size_t nbc, loff_t* 
     if (!kbuf)
         return -ENOMEM; 
 
-    // Read the buffer until it's either empty of reach the number of bytes 
-    // asked by the user-space process. 
+    // Read the buffer we reach the number of bytes we want to read or until we 
+    // reach the write cursor. 
     been_read = 0; 
     to_read = nbc; 
-    while (to_read > 0 && fifos[minor].index >= 0)
+    while (to_read > 0)
     {
-        kbuf[been_read] = (fifos[minor].buffer)[fifos[minor].index]; 
-        
-        fifos[minor].index -= 1; 
-        to_read -= 1; 
+        // TODO: Read one character less than it should. 
+        kbuf[been_read] = (fifos[minor].buffer)[fifos[minor].r_cur]; 
+        fifos[minor].r_cur = (fifos[minor].r_cur + 1) % FIFO_BUFFER_SIZE; 
+
         been_read += 1; 
+        to_read -= 1; 
+
+        // If we reach the write cursor, stop the read. 
+        if (fifos[minor].r_cur == fifos[minor].w_cur)
+            // TODO: Block the execution, waiting for new bytes in the buffer. 
+            break; 
     }
 
     // Copy the kernel buffer into user-space buffer, free the kernel buffer 
@@ -211,7 +226,7 @@ static ssize_t fifo_read(struct file* fp, char __user* buf, size_t nbc, loff_t* 
     if (retval) 
         return -EFAULT; 
     
-    printk(KERN_INFO "[FIFO] Device %d read %ld bytes.\n", minor, been_read); 
+    printk(KERN_INFO "[FIFO] %ld byte(s) returned to MINOR %d, read_cursor currently at %d.\n", been_read, minor, fifos[minor].r_cur); 
     return been_read; 
 }
 
@@ -231,6 +246,16 @@ static ssize_t fifo_write(struct file* fp, const char __user* buf, size_t nbc, l
         return -ENODEV; 
     }
 
+    printk("[FIFO] %ld byte(s) write operation asked from MINOR %d, write_cursor currently at %d\n", nbc, minor, fifos[minor].w_cur); 
+
+    // If the next write cursor is the read cursor, abort the read to not 
+    // overwrite the read buffer. 
+    if ((fifos[minor].w_cur + 1) % FIFO_BUFFER_SIZE == fifos[minor].r_cur)
+        // TODO: Block the write while previously written data has not been 
+        // TODO: read. 
+        return nbc; 
+
+
     // Allocate a kernel buffer and get user-space provided data. 
     kbuf = kmalloc(nbc, GFP_KERNEL);
     if (!kbuf)
@@ -238,17 +263,25 @@ static ssize_t fifo_write(struct file* fp, const char __user* buf, size_t nbc, l
 
     retval = copy_from_user(kbuf, buf, nbc); 
     if (retval)
+    {
+        kfree(kbuf); 
         return -EFAULT; 
+    }
 
 
     for (i = 0; i < nbc; i += 1)
     {
-        fifos[minor].index += 1; 
-        fifos[minor].buffer[fifos[minor].index] = kbuf[i]; 
-        
+        fifos[minor].w_cur = (fifos[minor].w_cur + 1) % FIFO_BUFFER_SIZE;
+
+        if ((fifos[minor].w_cur + 1) % FIFO_BUFFER_SIZE == fifos[minor].r_cur)
+            // TODO: Block the write while previously written data has not been 
+            // TODO: read. 
+            break;
+
+        fifos[minor].buffer[fifos[minor].w_cur] = kbuf[i];  
     }
 
-    printk(KERN_INFO "[FIFO] write operation asked. %s\n", kbuf); 
+    printk(KERN_INFO "[FIFO] %ld byte(s) written to device with MINOR %d, write_cursor currently at %d.\n", nbc, minor, fifos[minor].w_cur); 
 
     kfree(kbuf); 
     return nbc; 
