@@ -1,3 +1,5 @@
+ccflags-y += -I$(PWD)/includes
+
 ifneq ($(KERNELRELEASE),)
     obj-m := fifo.o
 else

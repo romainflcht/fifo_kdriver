@@ -9,7 +9,7 @@ if [ "$USER" != "root" ] ; then
 fi
 
 cdev_name="fifo"
-cdev_count=2
+cdev_count=3
 username=romain
 major=`grep $cdev_name /proc/devices |cut -d' ' -f1`
 
