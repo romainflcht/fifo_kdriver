@@ -1,8 +1,15 @@
+/*
+TODO: Add config while running via ioctl
+TODO: file in sys/class/fifo0/size, free, used.
+TODO: support non blocking mode -> return -EAGAIN without writing (free space detection). 
+*/
+
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/cdev.h>
 #include <linux/wait.h>
+#include <linux/mutex.h>
 #include <linux/fs.h>
 
 #include "configuration.h"
@@ -17,6 +24,8 @@ MODULE_AUTHOR("Romain FLACHAT");
 typedef struct fifo_t
 {
     struct cdev     cdev; 
+    struct mutex    r_mutex; 
+    struct mutex    w_mutex; 
     char*           buffer;
     int             r_cur; 
     int             w_cur; 
@@ -64,7 +73,6 @@ struct file_operations fifo_fops = {
 
 
 // * _ GLOBAL VARIABLES ________________________________________________________
-static          DECLARE_WAIT_QUEUE_HEAD(r_wait_queue);
 static          DECLARE_WAIT_QUEUE_HEAD(w_wait_queue);
 unsigned int    fifo_major = FIFO_MAJOR_NUMBER; 
 FIFO_t          fifos[FIFO_DEV_COUNT]; 
@@ -164,6 +172,8 @@ static int init_cdev_fifo(FIFO_t* fifo, unsigned int minor, struct file_operatio
         return -ENOMEM; 
     }
     
+    mutex_init(&(fifo->r_mutex)); 
+    mutex_init(&(fifo->w_mutex)); 
     fifo->r_cur = -1; 
     fifo->w_cur = 0; 
 
@@ -208,6 +218,11 @@ static ssize_t fifo_read(struct file* fp, char __user* buf, size_t nbc, loff_t* 
     if (!kbuf)
         return -ENOMEM; 
 
+    // Protect the read operation from other concurrent process by locking the 
+    // read mutex. 
+    if (mutex_lock_interruptible(&(fifos[minor].r_mutex)))
+        return -ERESTARTSYS;
+
     // Read the buffer we reach the number of bytes we want to read or until we 
     // reach the write cursor. 
     been_read = 0; 
@@ -235,9 +250,12 @@ static ssize_t fifo_read(struct file* fp, char __user* buf, size_t nbc, loff_t* 
     // and return the number of bytes returned. 
     retval = copy_to_user(buf, kbuf, been_read);
     kfree(kbuf); 
-    
+
     if (retval) 
         return -EFAULT; 
+    
+    // Unlock the read mutex. 
+    mutex_unlock(&(fifos[minor].r_mutex));
     
     INFO_DEBUG(
         "[FIFO] %ld byte(s) returned to MINOR %d, read_cursor "
@@ -274,13 +292,10 @@ static ssize_t fifo_write(struct file* fp, const char __user* buf, size_t nbc, l
     // overwrite the read buffer. 
     if (fifos[minor].w_cur == fifos[minor].r_cur)
     {
-        // TODO: Block the write while previously written data has not been 
-        // TODO: read. 
         INFO_DEBUG("[FIFO] No space left to write, waiting for read.\n"); 
         w_is_unlock = false; 
         wait_event_interruptible(w_wait_queue, w_is_unlock); 
     }
-
 
     // Allocate a kernel buffer and get user-space provided data. 
     kbuf = kmalloc(nbc, GFP_KERNEL);
@@ -293,6 +308,11 @@ static ssize_t fifo_write(struct file* fp, const char __user* buf, size_t nbc, l
         kfree(kbuf); 
         return -EFAULT; 
     }
+
+    // Protect the write operation from other concurrent process by locking the 
+    // write mutex. 
+    if (mutex_lock_interruptible(&(fifos[minor].w_mutex)))
+        return -ERESTARTSYS;
 
     i = 0; 
     while (i < nbc)
@@ -308,9 +328,6 @@ static ssize_t fifo_write(struct file* fp, const char __user* buf, size_t nbc, l
         }
 
         fifos[minor].buffer[fifos[minor].w_cur] = kbuf[i]; 
-        
-        INFO_DEBUG("Wrote %c at %d\n", fifos[minor].buffer[fifos[minor].w_cur], fifos[minor].w_cur); 
-
 
         // If the next position is safe, increment the write cursor. 
         fifos[minor].w_cur = (fifos[minor].w_cur + 1) % FIFO_BUFFER_SIZE;
@@ -332,6 +349,9 @@ static ssize_t fifo_write(struct file* fp, const char __user* buf, size_t nbc, l
     ); 
 
     kfree(kbuf); 
+
+    // Unlock the write mutex. 
+    mutex_unlock(&(fifos[minor].w_mutex)); 
 
     WARN_DEBUG("from W: r: %d, w: %d", fifos[minor].r_cur, fifos[minor].w_cur); 
     return nbc; 
