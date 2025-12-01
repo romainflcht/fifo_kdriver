@@ -37,12 +37,6 @@ default:
 	@echo "$(MAGENTA)~COMPILING $(RST)$(BOLD)$(KERN_TARGET)$(RST)$(MAGENTA)..."
 
 	@$(MAKE) -C $(KERNELDIR) M=$(PWD) modules
-
-	@echo "$(YELLOW)--USER SPACE COMPILATION: $(RST)$(BOLD)$(OBJS)$(RST)"
-	@echo "$(MAGENTA)~COMPILING $(RST)$(BOLD)$(USER_TARGET)$(RST)$(MAGENTA) TO $(RST)$(BOLD)$(BIN_DIR)/$(USER_TARGET)$(RST)"
-
-	@$(CC) $(TEST_DIR)/$(USER_TARGET).c -o $(BIN_DIR)/$(USER_TARGET) -I$(INC_DIR)
-
 	@echo "$(BOLD)$(GREEN)~ DONE ~$(RST)"
 
 clean:
@@ -62,6 +56,9 @@ remove:
 update: remove insert
 
 test: default
+	@echo "$(YELLOW)--USER SPACE COMPILATION: $(RST)$(BOLD)$(OBJS)$(RST)"
+	@echo "$(MAGENTA)~COMPILING $(RST)$(BOLD)$(USER_TARGET)$(RST)$(MAGENTA) TO $(RST)$(BOLD)$(BIN_DIR)/$(USER_TARGET)$(RST)"
+	@$(CC) $(TEST_DIR)/$(USER_TARGET).c -o $(BIN_DIR)/$(USER_TARGET) -I$(INC_DIR)
 	@./$(BIN_DIR)/$(USER_TARGET)
 
 .PHONY: clean default insert remove update
