@@ -1,5 +1,5 @@
 /*
-TODO: file in sys/class/fifo0/size, free, used.
+TODO: file in sys/class/fifo0/size, free, used. 
 TODO: support non blocking mode -> return -EAGAIN without writing (free space detection). 
 */
 
@@ -209,6 +209,13 @@ void fifo_reset(unsigned int minor)
 {
     int i; 
 
+    // Lock the read and write mutex while resetting the buffer. 
+    if (mutex_lock_interruptible(&(fifos[minor].r_mutex)))
+        return -ERESTARTSYS;
+
+    if (mutex_lock_interruptible(&(fifos[minor].w_mutex)))
+        return -ERESTARTSYS;
+
     // Empty the fifo buffer. 
     for (i = 0; i < FIFO_BUFFER_SIZE; i += 1)
         fifos[minor].buffer[i] = 0; 
@@ -216,6 +223,10 @@ void fifo_reset(unsigned int minor)
     // Reset cursor position. 
     fifos[minor].r_cur = -1; 
     fifos[minor].w_cur = 0; 
+
+    // Unlock both mutexes. 
+    mutex_unlock(&(fifos[minor].r_mutex)); 
+    mutex_unlock(&(fifos[minor].w_mutex)); 
     return; 
 }
 
