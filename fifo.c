@@ -3,13 +3,16 @@ TODO: file in sys/class/fifo0/size, free, used.
 TODO: support non blocking mode -> return -EAGAIN without writing (free space detection). 
 */
 
-#include <linux/module.h>
+#include <linux/version.h>
 #include <linux/kernel.h>
+#include <linux/module.h>
 #include <linux/init.h>
 #include <linux/cdev.h>
-#include <linux/wait.h>
-#include <linux/mutex.h>
 #include <linux/fs.h>
+#include <linux/mutex.h>
+#include <linux/uaccess.h>
+#include <linux/wait.h>
+#include <linux/sched.h>
 
 #include "configuration.h"
 #include "ioctl_command.h"
@@ -95,7 +98,7 @@ bool            r_is_unlock;
 bool            w_is_unlock; 
 
 
-static int __init fifo_init(void)
+int __init fifo_init(void)
 {
     dev_t   devno;
     int     retval; 
@@ -135,34 +138,37 @@ static int __init fifo_init(void)
     return 0; 
 }
 
-
-static void __exit fifo_exit(void)
-{
-    int i; 
-
-    // Unload each devices, free allocated memory and unregister the MAJOR. 
-    for (i = 0; i < FIFO_DEV_COUNT; i += 1)
+#ifdef MODULE_COMPILATION
+    static void __exit fifo_exit(void)
     {
-        cdev_del(&(fifos[i].cdev)); 
-        kfree(fifos[i].buffer); 
-    } 
+        int i; 
 
-    unregister_chrdev_region(MKDEV(fifo_major, 0), FIFO_DEV_COUNT); 
-    printk(KERN_INFO "[FIFO] driver unloaded successfully, goodbye!\n"); 
-    return; 
-}
+        // Unload each devices, free allocated memory and unregister the MAJOR. 
+        for (i = 0; i < FIFO_DEV_COUNT; i += 1)
+        {
+            cdev_del(&(fifos[i].cdev)); 
+            kfree(fifos[i].buffer); 
+        } 
 
+        unregister_chrdev_region(MKDEV(fifo_major, 0), FIFO_DEV_COUNT); 
+        printk(KERN_INFO "[FIFO] driver unloaded successfully, goodbye!\n"); 
+        return; 
+    }
+#endif
 
-module_init(fifo_init); 
-module_exit(fifo_exit); 
+#ifdef MODULE_COMPILATION
+    module_init(fifo_init); 
+    module_exit(fifo_exit); 
+#endif
 
 
 // * _ STATIC FUNCTIONS ________________________________________________________
 
 static int init_cdev_fifo(FIFO_t* fifo, unsigned int minor, struct file_operations* fops)
 {
-    int     retval; 
     dev_t   dev_minor; 
+    int     retval; 
+    int     i; 
 
     dev_minor = MKDEV(fifo_major, minor); 
 
@@ -193,7 +199,7 @@ static int init_cdev_fifo(FIFO_t* fifo, unsigned int minor, struct file_operatio
     fifo->w_cur = 0; 
 
     // Fill the buffer with zeros. 
-    for (int i = 0; i < FIFO_BUFFER_SIZE; i += 1)
+    for (i = 0; i < FIFO_BUFFER_SIZE; i += 1)
         fifo->buffer[i] = 0; 
     
     INFO_DEBUG("[FIFO] device %d is correctly registered.\n", minor);
@@ -238,7 +244,12 @@ static ssize_t fifo_read(struct file* fp, char __user* buf, size_t nbc, loff_t* 
     char*           kbuf; 
 
     // Get the device minor number that asked the read. 
-    minor = iminor(file_inode(fp)); 
+    #if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 9, 0) 
+        minor = iminor(file_inode(fp)); 
+    #else
+        minor = MINOR(fp->f_path.dentry->d_inode->i_rdev);
+    #endif
+    
     if (minor > FIFO_DEV_COUNT - 1)
     {
         ERR_DEBUG("[FIFO] Trying to access an unregistered device.\n"); 
@@ -246,7 +257,7 @@ static ssize_t fifo_read(struct file* fp, char __user* buf, size_t nbc, loff_t* 
     }
 
     INFO_DEBUG(
-        "[FIFO] %ld byte(s) read operation asked from MINOR %d, "
+        "[FIFO] %zu byte(s) read operation asked from MINOR %d, "
         "read_cursor currently at %d\n", nbc, minor, fifos[minor].r_cur
     ); 
 
@@ -299,12 +310,12 @@ static ssize_t fifo_read(struct file* fp, char __user* buf, size_t nbc, loff_t* 
     mutex_unlock(&(fifos[minor].r_mutex));
     
     INFO_DEBUG(
-        "[FIFO] %ld byte(s) returned to MINOR %d, read_cursor "
+        "[FIFO] %zu byte(s) returned to MINOR %d, read_cursor "
         "currently at %d.\n", been_read, minor, fifos[minor].r_cur
     );
 
 
-    WARN_DEBUG("from R: r: %d, w: %d (%ld)", fifos[minor].r_cur, fifos[minor].w_cur, been_read); 
+    WARN_DEBUG("from R: r: %d, w: %d (%zu)", fifos[minor].r_cur, fifos[minor].w_cur, been_read); 
     return been_read; 
 }
 
@@ -316,8 +327,13 @@ static ssize_t fifo_write(struct file* fp, const char __user* buf, size_t nbc, l
     char*           kbuf;
     size_t          i; 
 
-    // Get the device minor number that asked the read. 
-    minor = iminor(file_inode(fp)); 
+    // Get the device minor number that asked the write. 
+    #if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 9, 0) 
+        minor = iminor(file_inode(fp)); 
+    #else
+        minor = MINOR(fp->f_path.dentry->d_inode->i_rdev);
+    #endif
+
     if (minor > FIFO_DEV_COUNT - 1)
     {
         ERR_DEBUG("[FIFO] Trying to access an unregistered device.\n"); 
@@ -325,7 +341,7 @@ static ssize_t fifo_write(struct file* fp, const char __user* buf, size_t nbc, l
     }
 
     INFO_DEBUG(
-        "[FIFO] %ld byte(s) write operation asked from MINOR %d, "
+        "[FIFO] %zu byte(s) write operation asked from MINOR %d, "
         "write_cursor currently at %d\n", nbc, minor, fifos[minor].w_cur
     ); 
 
@@ -335,7 +351,7 @@ static ssize_t fifo_write(struct file* fp, const char __user* buf, size_t nbc, l
     {
         INFO_DEBUG("[FIFO] No space left to write, waiting for read.\n"); 
         w_is_unlock = false; 
-        wait_event_interruptible(w_wait_queue, w_is_unlock); 
+        wait_event_interruptible(w_wait_queue, w_is_unlock);
     }
 
     // Allocate a kernel buffer and get user-space provided data. 
@@ -385,7 +401,7 @@ static ssize_t fifo_write(struct file* fp, const char __user* buf, size_t nbc, l
     }
 
     INFO_DEBUG(
-        "[FIFO] %ld byte(s) written to device with MINOR %d, "
+        "[FIFO] %zu byte(s) written to device with MINOR %d, "
         "write_cursor currently at %d.\n", nbc, minor, fifos[minor].w_cur
     ); 
 
@@ -405,7 +421,12 @@ static long int fifo_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
     unsigned int    minor; 
 
     // Get the device minor number that need to be configured. 
-    minor = iminor(file_inode(fp)); 
+    #if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 9, 0) 
+        minor = iminor(file_inode(fp)); 
+    #else
+        minor = MINOR(fp->f_path.dentry->d_inode->i_rdev);
+    #endif
+
     if (minor > FIFO_DEV_COUNT - 1)
     {
         ERR_DEBUG("[FIFO] Trying to access an unregistered device.\n"); 
