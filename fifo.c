@@ -2,6 +2,7 @@
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/cdev.h>
+#include <linux/wait.h>
 #include <linux/fs.h>
 
 #include "configuration.h"
@@ -50,6 +51,9 @@ static ssize_t fifo_read(struct file* fp, char __user* buf, size_t nbc, loff_t* 
 static ssize_t fifo_write(struct file* fp, const char __user* buf, size_t nbc, loff_t* pos); 
 
 
+void _buff_debug(int minor); 
+
+
 // * _ FILE OPERATION __________________________________________________________
 
 struct file_operations fifo_fops = {
@@ -60,9 +64,12 @@ struct file_operations fifo_fops = {
 
 
 // * _ GLOBAL VARIABLES ________________________________________________________
+static          DECLARE_WAIT_QUEUE_HEAD(r_wait_queue);
+static          DECLARE_WAIT_QUEUE_HEAD(w_wait_queue);
 unsigned int    fifo_major = FIFO_MAJOR_NUMBER; 
 FIFO_t          fifos[FIFO_DEV_COUNT]; 
-
+bool            r_is_unlock; 
+bool            w_is_unlock; 
 
 static int __init fifo_init(void)
 {
@@ -99,6 +106,8 @@ static int __init fifo_init(void)
             return -EFAULT; 
     } 
 
+    r_is_unlock = true; 
+    w_is_unlock = true; 
     printk(KERN_INFO "[FIFO] driver loaded successfully!\n"); 
     return 0; 
 }
@@ -192,8 +201,7 @@ static ssize_t fifo_read(struct file* fp, char __user* buf, size_t nbc, loff_t* 
 
     // If the read cursor is already on write cursor, read nothing. 
     if ((fifos[minor].r_cur + 1) % FIFO_BUFFER_SIZE == fifos[minor].w_cur)
-        // TODO: Block the execution, waiting for new bytes in the buffer. 
-        return 0;
+        return 0; 
 
     // Else, allocate a kernel buffer to read the fifo buffer. 
     kbuf = kmalloc(nbc, GFP_KERNEL); 
@@ -213,9 +221,14 @@ static ssize_t fifo_read(struct file* fp, char __user* buf, size_t nbc, loff_t* 
         to_read -= 1; 
 
         // If we reach the write cursor, stop the read. 
-        if ((fifos[minor].r_cur + 1 % FIFO_BUFFER_SIZE) == fifos[minor].w_cur)
-            // TODO: Block the execution, waiting for new bytes in the buffer. 
+        if (((fifos[minor].r_cur + 1) % FIFO_BUFFER_SIZE) == fifos[minor].w_cur)
             break; 
+    }
+
+    if (!w_is_unlock)
+    {
+        w_is_unlock = true; 
+        wake_up_interruptible(&w_wait_queue); 
     }
 
     // Copy the kernel buffer into user-space buffer, free the kernel buffer 
@@ -231,6 +244,8 @@ static ssize_t fifo_read(struct file* fp, char __user* buf, size_t nbc, loff_t* 
         "currently at %d.\n", been_read, minor, fifos[minor].r_cur
     );
 
+
+    WARN_DEBUG("from R: r: %d, w: %d (%ld)", fifos[minor].r_cur, fifos[minor].w_cur, been_read); 
     return been_read; 
 }
 
@@ -238,9 +253,9 @@ static ssize_t fifo_read(struct file* fp, char __user* buf, size_t nbc, loff_t* 
 static ssize_t fifo_write(struct file* fp, const char __user* buf, size_t nbc, loff_t* pos)
 {
     int             retval;
-    size_t          i; 
     unsigned int    minor;
     char*           kbuf;
+    size_t          i; 
 
     // Get the device minor number that asked the read. 
     minor = iminor(fp->f_inode); 
@@ -258,9 +273,13 @@ static ssize_t fifo_write(struct file* fp, const char __user* buf, size_t nbc, l
     // If the next write cursor is the read cursor, abort the read to not 
     // overwrite the read buffer. 
     if (fifos[minor].w_cur == fifos[minor].r_cur)
+    {
         // TODO: Block the write while previously written data has not been 
         // TODO: read. 
-        return nbc; 
+        INFO_DEBUG("[FIFO] No space left to write, waiting for read.\n"); 
+        w_is_unlock = false; 
+        wait_event_interruptible(w_wait_queue, w_is_unlock); 
+    }
 
 
     // Allocate a kernel buffer and get user-space provided data. 
@@ -275,17 +294,36 @@ static ssize_t fifo_write(struct file* fp, const char __user* buf, size_t nbc, l
         return -EFAULT; 
     }
 
-
-    for (i = 0; i < nbc; i += 1)
+    i = 0; 
+    while (i < nbc)
     {
-        fifos[minor].buffer[fifos[minor].w_cur] = kbuf[i];  
+        // Check if the read cursor has moved from it's initialization. If not, 
+        // stop the writting before it to not block the read cursor and lose the
+        // initial write data. 
+        if (fifos[minor].r_cur == -1 && fifos[minor].w_cur == FIFO_BUFFER_SIZE - 1)
+        {
+            INFO_DEBUG("[FIFO] No space left to write, waiting for read.\n"); 
+            w_is_unlock = false; 
+            wait_event_interruptible(w_wait_queue, w_is_unlock); 
+        }
 
+        fifos[minor].buffer[fifos[minor].w_cur] = kbuf[i]; 
+        
+        INFO_DEBUG("Wrote %c at %d\n", fifos[minor].buffer[fifos[minor].w_cur], fifos[minor].w_cur); 
+
+
+        // If the next position is safe, increment the write cursor. 
         fifos[minor].w_cur = (fifos[minor].w_cur + 1) % FIFO_BUFFER_SIZE;
-        if (fifos[minor].w_cur == fifos[minor].r_cur)
-            // TODO: Block the write while previously written data has not been 
-            // TODO: read. 
-            break;
+        i += 1; 
 
+        // If the write cursor is positionned on the read cursor, no space left 
+        // to write, block the execution. 
+        if (fifos[minor].w_cur == fifos[minor].r_cur)
+        {
+            INFO_DEBUG("[FIFO] No space left to write, waiting for read efef.\n"); 
+            w_is_unlock = false; 
+            wait_event_interruptible(w_wait_queue, w_is_unlock); 
+        }
     }
 
     INFO_DEBUG(
@@ -294,5 +332,21 @@ static ssize_t fifo_write(struct file* fp, const char __user* buf, size_t nbc, l
     ); 
 
     kfree(kbuf); 
+
+    WARN_DEBUG("from W: r: %d, w: %d", fifos[minor].r_cur, fifos[minor].w_cur); 
     return nbc; 
+}
+
+
+
+void _buff_debug(int minor)
+{
+    int i; 
+
+    INFO_DEBUG("\n\n ["); 
+
+    for (i = 0; i < FIFO_BUFFER_SIZE; i += 1)
+        INFO_DEBUG("%c,", fifos[minor].buffer[i]);
+
+    INFO_DEBUG("]  \n\n"); 
 }
