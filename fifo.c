@@ -45,7 +45,7 @@ static int init_cdev_fifo(FIFO_t* fifo, unsigned int minor, struct file_operatio
 /// @brief Reset the fifo buffer, empty it and reset read & write cursor 
 ///        position. 
 /// @param minor minor number of the fifo to reset. 
-static void fifo_reset(unsigned int minor); 
+static int fifo_reset(unsigned int minor); 
 
 
 /// @brief read file operation override. 
@@ -74,10 +74,6 @@ static ssize_t fifo_write(struct file* fp, const char __user* buf, size_t nbc, l
 /// @param arg   argument of the command sent by the process. 
 /// @return      0 if no error occurred, error code otherwise. 
 static long int fifo_ioctl(struct file *fp, unsigned int cmd, unsigned long arg); 
-
-
-
-void _buff_debug(int minor); 
 
 
 // * _ FILE OPERATION __________________________________________________________
@@ -205,7 +201,7 @@ static int init_cdev_fifo(FIFO_t* fifo, unsigned int minor, struct file_operatio
 }
 
 
-void fifo_reset(unsigned int minor)
+static int fifo_reset(unsigned int minor)
 {
     int i; 
 
@@ -227,7 +223,7 @@ void fifo_reset(unsigned int minor)
     // Unlock both mutexes. 
     mutex_unlock(&(fifos[minor].r_mutex)); 
     mutex_unlock(&(fifos[minor].w_mutex)); 
-    return; 
+    return 0; 
 }
 
 
@@ -382,7 +378,7 @@ static ssize_t fifo_write(struct file* fp, const char __user* buf, size_t nbc, l
         // to write, block the execution. 
         if (fifos[minor].w_cur == fifos[minor].r_cur)
         {
-            INFO_DEBUG("[FIFO] No space left to write, waiting for read efef.\n"); 
+            INFO_DEBUG("[FIFO] No space left to write, waiting for read.\n"); 
             w_is_unlock = false; 
             wait_event_interruptible(w_wait_queue, w_is_unlock); 
         }
@@ -397,8 +393,6 @@ static ssize_t fifo_write(struct file* fp, const char __user* buf, size_t nbc, l
 
     // Unlock the write mutex. 
     mutex_unlock(&(fifos[minor].w_mutex)); 
-
-    WARN_DEBUG("from W: r: %d, w: %d", fifos[minor].r_cur, fifos[minor].w_cur); 
     return nbc; 
 }
 
@@ -407,6 +401,7 @@ static long int fifo_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 {
     int             r_cur; 
     int             w_cur; 
+    int             retval; 
     unsigned int    minor; 
 
     // Get the device minor number that need to be configured. 
@@ -421,22 +416,27 @@ static long int fifo_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
     {
         case IO_FIFO_RESET: 
             // Reset the fifo read and write cursor and clear the buffer. 
-            fifo_reset(minor); 
+            retval = fifo_reset(minor); 
+
+            if (retval)
+                return -EFAULT; 
         break; 
 
         case IO_FIFO_GET_R_CUR: 
             // Send the read cursor to the userspace. 
             r_cur = fifos[minor].r_cur; 
+            retval = copy_to_user((int __user *)arg, &r_cur, sizeof(int));
 
-            if (copy_to_user((int __user *)arg, &r_cur, sizeof(int)))
+            if (retval)
                 return -EFAULT;
         break; 
 
         case IO_FIFO_GET_W_CUR: 
             // Send the write cursor to the userspace. 
             w_cur = fifos[minor].w_cur; 
+            retval = copy_to_user((int __user *)arg, &w_cur, sizeof(int)); 
 
-            if (copy_to_user((int __user *)arg, &w_cur, sizeof(int)))
+            if (retval)
                 return -EFAULT;
         break; 
 
@@ -445,17 +445,4 @@ static long int fifo_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
     }
 
     return 0; 
-}
-
-
-void _buff_debug(int minor)
-{
-    int i; 
-
-    INFO_DEBUG("\n\n ["); 
-
-    for (i = 0; i < FIFO_BUFFER_SIZE; i += 1)
-        INFO_DEBUG("%c,", fifos[minor].buffer[i]);
-
-    INFO_DEBUG("]  \n\n"); 
 }
