@@ -1,5 +1,4 @@
 /*
-TODO: Add config while running via ioctl
 TODO: file in sys/class/fifo0/size, free, used.
 TODO: support non blocking mode -> return -EAGAIN without writing (free space detection). 
 */
@@ -13,6 +12,7 @@ TODO: support non blocking mode -> return -EAGAIN without writing (free space de
 #include <linux/fs.h>
 
 #include "configuration.h"
+#include "ioctl_command.h"
 #include "macros.h"
 
 MODULE_LICENSE("GPL"); 
@@ -42,6 +42,12 @@ typedef struct fifo_t
 static int init_cdev_fifo(FIFO_t* fifo, unsigned int minor, struct file_operations* fops);
 
 
+/// @brief Reset the fifo buffer, empty it and reset read & write cursor 
+///        position. 
+/// @param minor minor number of the fifo to reset. 
+static void fifo_reset(unsigned int minor); 
+
+
 /// @brief read file operation override. 
 /// @param fp  pointer to the file structure. 
 /// @param buf user-space buffer to put read data. 
@@ -60,15 +66,28 @@ static ssize_t fifo_read(struct file* fp, char __user* buf, size_t nbc, loff_t* 
 static ssize_t fifo_write(struct file* fp, const char __user* buf, size_t nbc, loff_t* pos); 
 
 
+/// @brief ioctl file operation override. 
+/// @param inode pointer the the inode structure. 
+/// @param fp    pointer the the file structure. 
+/// @param cmd   command to execute. Definitions of every commands are in the 
+///              file "ioctl_command.h". 
+/// @param arg   argument of the command sent by the process. 
+/// @return      0 if no error occurred, error code otherwise. 
+static long int fifo_ioctl(struct file *fp, unsigned int cmd, unsigned long arg); 
+
+
+
 void _buff_debug(int minor); 
 
 
 // * _ FILE OPERATION __________________________________________________________
 
 struct file_operations fifo_fops = {
-    .owner = THIS_MODULE, 
-    .read  = fifo_read,
-    .write = fifo_write,
+    .owner          = THIS_MODULE, 
+    .read           = fifo_read,
+    .write          = fifo_write,
+    .unlocked_ioctl = fifo_ioctl, 
+    .compat_ioctl   = fifo_ioctl, 
 };
 
 
@@ -78,6 +97,7 @@ unsigned int    fifo_major = FIFO_MAJOR_NUMBER;
 FIFO_t          fifos[FIFO_DEV_COUNT]; 
 bool            r_is_unlock; 
 bool            w_is_unlock; 
+
 
 static int __init fifo_init(void)
 {
@@ -96,7 +116,6 @@ static int __init fifo_init(void)
 
     if (retval < 0)
     {
-        
         ERR_DEBUG("[FIFO] error while allocating MAJOR, exiting...\n"); 
         return -ENODEV; 
     }
@@ -186,6 +205,21 @@ static int init_cdev_fifo(FIFO_t* fifo, unsigned int minor, struct file_operatio
 }
 
 
+void fifo_reset(unsigned int minor)
+{
+    int i; 
+
+    // Empty the fifo buffer. 
+    for (i = 0; i < FIFO_BUFFER_SIZE; i += 1)
+        fifos[minor].buffer[i] = 0; 
+
+    // Reset cursor position. 
+    fifos[minor].r_cur = -1; 
+    fifos[minor].w_cur = 0; 
+    return; 
+}
+
+
 // * _ FILE OPERATION FUNCTIONS ________________________________________________
 
 static ssize_t fifo_read(struct file* fp, char __user* buf, size_t nbc, loff_t* pos)
@@ -197,7 +231,7 @@ static ssize_t fifo_read(struct file* fp, char __user* buf, size_t nbc, loff_t* 
     char*           kbuf; 
 
     // Get the device minor number that asked the read. 
-    minor = iminor(fp->f_inode); 
+    minor = iminor(file_inode(fp)); 
     if (minor > FIFO_DEV_COUNT - 1)
     {
         ERR_DEBUG("[FIFO] Trying to access an unregistered device.\n"); 
@@ -214,7 +248,7 @@ static ssize_t fifo_read(struct file* fp, char __user* buf, size_t nbc, loff_t* 
         return 0; 
 
     // Else, allocate a kernel buffer to read the fifo buffer. 
-    kbuf = kmalloc(nbc, GFP_KERNEL); 
+    kbuf = (char*)kmalloc(nbc, GFP_KERNEL); 
     if (!kbuf)
         return -ENOMEM; 
 
@@ -276,7 +310,7 @@ static ssize_t fifo_write(struct file* fp, const char __user* buf, size_t nbc, l
     size_t          i; 
 
     // Get the device minor number that asked the read. 
-    minor = iminor(fp->f_inode); 
+    minor = iminor(file_inode(fp)); 
     if (minor > FIFO_DEV_COUNT - 1)
     {
         ERR_DEBUG("[FIFO] Trying to access an unregistered device.\n"); 
@@ -298,7 +332,7 @@ static ssize_t fifo_write(struct file* fp, const char __user* buf, size_t nbc, l
     }
 
     // Allocate a kernel buffer and get user-space provided data. 
-    kbuf = kmalloc(nbc, GFP_KERNEL);
+    kbuf = (char*)kmalloc(nbc, GFP_KERNEL);
     if (!kbuf)
         return -ENOMEM; 
 
@@ -357,6 +391,50 @@ static ssize_t fifo_write(struct file* fp, const char __user* buf, size_t nbc, l
     return nbc; 
 }
 
+
+static long int fifo_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
+{
+    int             r_cur; 
+    int             w_cur; 
+    unsigned int    minor; 
+
+    // Get the device minor number that need to be configured. 
+    minor = iminor(file_inode(fp)); 
+    if (minor > FIFO_DEV_COUNT - 1)
+    {
+        ERR_DEBUG("[FIFO] Trying to access an unregistered device.\n"); 
+        return -ENODEV; 
+    }
+
+    switch(cmd)
+    {
+        case IO_FIFO_RESET: 
+            // Reset the fifo read and write cursor and clear the buffer. 
+            fifo_reset(minor); 
+        break; 
+
+        case IO_FIFO_GET_R_CUR: 
+            // Send the read cursor to the userspace. 
+            r_cur = fifos[minor].r_cur; 
+
+            if (copy_to_user((int __user *)arg, &r_cur, sizeof(int)))
+                return -EFAULT;
+        break; 
+
+        case IO_FIFO_GET_W_CUR: 
+            // Send the write cursor to the userspace. 
+            w_cur = fifos[minor].w_cur; 
+
+            if (copy_to_user((int __user *)arg, &w_cur, sizeof(int)))
+                return -EFAULT;
+        break; 
+
+        default: 
+            return -ENOTTY; 
+    }
+
+    return 0; 
+}
 
 
 void _buff_debug(int minor)
