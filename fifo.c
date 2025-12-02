@@ -26,12 +26,12 @@ MODULE_AUTHOR("Romain FLACHAT");
 
 typedef struct fifo_t
 {
-    struct cdev     cdev; 
-    struct mutex    r_mutex; 
-    struct mutex    w_mutex; 
-    char*           buffer;
-    int             r_cur; 
-    int             w_cur; 
+    struct cdev     cdev;       ///< character device structure to register. 
+    struct mutex    r_mutex;    ///< read mutex protection. 
+    struct mutex    w_mutex;    ///< write mutex protection. 
+    char*           buffer;     ///< buffer containing fifo data. 
+    int             r_cur;      ///< read cursor. 
+    int             w_cur;      ///< write cursor. 
 }   FIFO_t; 
 
 
