@@ -19,6 +19,8 @@
 #endif
 
 #define FIFO_DEV_COUNT          3
-#define FIFO_BUFFER_SIZE        10
+#define FIFO_BUFFER_SIZE        2048
+
+#define ELT_CLASS_COUNT         10
 
 #endif 

@@ -29,7 +29,8 @@ typedef struct fifo_t
     struct cdev     cdev; 
     struct mutex    r_mutex; 
     struct mutex    w_mutex; 
-    char*           buffer;
+    struct device*  class_device;
+    unsigned char*  buffer;
     int             r_cur; 
     int             w_cur; 
 }   FIFO_t; 
@@ -39,7 +40,6 @@ typedef struct fifo_t
 
 /// @brief Module initialization function
 int __init fifo_init(void); 
-
 
 
 /// @brief Initialize the FIFO_t structure. 
@@ -83,6 +83,17 @@ static ssize_t fifo_write(struct file* fp, const char __user* buf, size_t nbc, l
 /// @return      0 if no error occurred, error code otherwise. 
 static long int fifo_ioctl(struct file *fp, unsigned int cmd, unsigned long arg); 
 
+// * _ CLASS DEVICE FUNCTIONS __________________________________________________
+
+/// @brief sys/class read function to shows buffer content through the 
+///        sys/class/fifo*/buffer file. 
+/// @param dev  pointer to a device struct. 
+/// @param attr not used. 
+/// @param buf  buffer where we'll print the buffer view. 
+/// @return 
+static ssize_t fifo_buffer_show(struct device *dev, struct device_attribute *attr, char *buf); 
+
+
 
 // * _ FILE OPERATION __________________________________________________________
 
@@ -96,10 +107,14 @@ struct file_operations fifo_fops = {
 
 
 // * _ GLOBAL VARIABLES ________________________________________________________
-static          DECLARE_WAIT_QUEUE_HEAD(w_wait_queue);
-unsigned int    fifo_major = FIFO_MAJOR_NUMBER; 
-FIFO_t          fifos[FIFO_DEV_COUNT]; 
-bool            w_is_unlock; 
+static                  DECLARE_WAIT_QUEUE_HEAD(w_wait_queue);
+unsigned int            fifo_major = FIFO_MAJOR_NUMBER; 
+FIFO_t                  fifos[FIFO_DEV_COUNT]; 
+static struct class*    fifo_class;
+bool                    w_is_unlock; 
+
+static DEVICE_ATTR(buffer, 0444, fifo_buffer_show, NULL);
+
 
 
 int __init fifo_init(void)
@@ -125,7 +140,11 @@ int __init fifo_init(void)
 
     // Save the major number. 
     fifo_major = MAJOR(devno);
-    INFO_DEBUG("[FIFO] MAJOR allocation successful, MAJOR is %d.\n", MAJOR(devno));  
+    INFO_DEBUG("[FIFO] MAJOR allocation successful, MAJOR is %d.\n", MAJOR(devno)); 
+
+    fifo_class = class_create("fifo");
+    if (IS_ERR(fifo_class))
+        return PTR_ERR(fifo_class);
 
     // Initialize the FIFO_t structure by allocation buffer memory and and 
     // minor device. 
@@ -146,12 +165,16 @@ int __init fifo_init(void)
     {
         int i; 
 
-        // Unload each devices, free allocated memory and unregister the MAJOR. 
+        // Unload each devices, free allocated memory, destroy class devices
+        // and unregister the MAJOR. 
         for (i = 0; i < FIFO_DEV_COUNT; i += 1)
         {
             cdev_del(&(fifos[i].cdev)); 
+            device_destroy(fifo_class, MKDEV(fifo_major, i));
             kfree(fifos[i].buffer); 
         } 
+
+        class_destroy(fifo_class);
 
         unregister_chrdev_region(MKDEV(fifo_major, 0), FIFO_DEV_COUNT); 
         printk(KERN_INFO "[FIFO] driver unloaded successfully, goodbye!\n"); 
@@ -193,9 +216,31 @@ static int init_cdev_fifo(FIFO_t* fifo, unsigned int minor, struct file_operatio
     if (!fifo->buffer)
     {
         ERR_DEBUG("[FIFO] device %d buffer not allocated correctly, abort.\n", minor);
+        cdev_del(&(fifo->cdev));
         return -ENOMEM; 
     }
+
+    // Create the device class device. 
+    fifo->class_device = device_create(
+        fifo_class, 
+        NULL, 
+        dev_minor, 
+        NULL, 
+        "fifo%c", 
+        ('0' + minor)
+    );
+
+    if (IS_ERR(fifo->class_device))
+    {
+        kfree(fifo->buffer); 
+        cdev_del(&(fifo->cdev));
+        return PTR_ERR(fifo->class_device);
+    }
+
+    // Create the buffer view sys/class file. 
+    device_create_file(fifo->class_device, &dev_attr_buffer);
     
+    // Initialize mutexes and cursors. 
     mutex_init(&(fifo->r_mutex)); 
     mutex_init(&(fifo->w_mutex)); 
     fifo->r_cur = -1; 
@@ -469,4 +514,62 @@ static long int fifo_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
     }
 
     return 0; 
+}
+
+
+// * _ CLASS DEVICES FUNCTIONS _________________________________________________
+
+static ssize_t fifo_buffer_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+    dev_t   devno; 
+    int     minor; 
+    ssize_t offset; 
+    bool    buf_overflow; 
+    int     i; 
+
+    devno = dev->devt; 
+    minor = MINOR(devno); 
+
+    // Check if the buffer is too large to print through sysfs. If it is, 
+    // truncate it during printing. 
+    buf_overflow = false; 
+    if ((FIFO_BUFFER_SIZE * 2)+ 6 > PAGE_SIZE)
+        buf_overflow = true; 
+
+    offset = 0; 
+
+    for (i = 0; i < FIFO_BUFFER_SIZE; i += 1)
+    {
+        // Is the buffer is too large, prints only firsts and lasts elements. 
+        if (buf_overflow && i > ELT_CLASS_COUNT && 
+            i < (FIFO_BUFFER_SIZE - 1) - ELT_CLASS_COUNT + 3)
+            continue; 
+
+        // Print ... for the last element to show in case the buffer is too 
+        // large. 
+        else if (buf_overflow && i == ELT_CLASS_COUNT - 1)
+        {
+            offset += sysfs_emit_at(buf, offset, "|..."); 
+            continue; 
+        }
+
+        // Print the current element unless it's 0. 
+        else if ((fifos[minor].buffer)[i] > 0x20)
+        {
+            offset += sysfs_emit_at(buf, offset, "|%c", (fifos[minor].buffer)[i]); 
+            continue; 
+        }
+
+        offset += sysfs_emit_at(buf, offset, "|@"); 
+    }
+
+    // Close the array. 
+    offset += sysfs_emit_at(buf, offset, "|\n"); 
+    INFO_DEBUG(
+        "[FIFO] Buffer view requested through /sys/class/fifo%d/. "
+        "Wrote %zu bytes.\n", 
+        minor, 
+        offset
+    ); 
+    return offset;
 }
