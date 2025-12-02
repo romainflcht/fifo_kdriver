@@ -37,6 +37,11 @@ typedef struct fifo_t
 
 // * _ STATIC FUNCTION DEFINITIONS _____________________________________________
 
+/// @brief Module initialization function
+int __init fifo_init(void); 
+
+
+
 /// @brief Initialize the FIFO_t structure. 
 /// @param fifo  pointer to a fifo structure. 
 /// @param minor minor number that will correspond to that FIFO_t device. 
@@ -94,7 +99,6 @@ struct file_operations fifo_fops = {
 static          DECLARE_WAIT_QUEUE_HEAD(w_wait_queue);
 unsigned int    fifo_major = FIFO_MAJOR_NUMBER; 
 FIFO_t          fifos[FIFO_DEV_COUNT]; 
-bool            r_is_unlock; 
 bool            w_is_unlock; 
 
 
@@ -132,7 +136,6 @@ int __init fifo_init(void)
             return -EFAULT; 
     } 
 
-    r_is_unlock = true; 
     w_is_unlock = true; 
     printk(KERN_INFO "[FIFO] driver loaded successfully!\n"); 
     return 0; 
