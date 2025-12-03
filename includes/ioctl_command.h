@@ -3,6 +3,7 @@
 
 #include <linux/ioctl.h>
 
+// * _ I/O CONTROL COMMANDS DEFINITIONS ________________________________________
 #define FIFO_MAGIC 0x40
 
 #define IO_FIFO_RESET      _IO(FIFO_MAGIC, 0)
