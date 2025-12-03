@@ -5,6 +5,7 @@ KERN_TARGET = fifo
 
 # _ DIRECTORIES ________________________________________________________________
 INC_DIR  = includes
+SRCS_DIR = srcs
 BIN_DIR  = bin
 TEST_DIR = tests
 
@@ -28,13 +29,14 @@ CUR_HOME = \e[H
 
 ifneq ($(KERNELRELEASE),)
     obj-m := $(KERN_TARGET).o
+	$(KERN_TARGET)-objs := main.o $(SRCS_DIR)/buffer.o $(SRCS_DIR)/fops.o $(SRCS_DIR)/class.o 
 else
    KERNELDIR ?= /lib/modules/$(shell uname -r)/build
    PWD := $(shell pwd)
 
 default:
 	@echo "$(YELLOW)--KERNEL SPACE COMPILATION: $(RST)$(BOLD)$(OBJS)$(RST)"
-	@echo "$(MAGENTA)~COMPILING $(RST)$(BOLD)$(KERN_TARGET)$(RST)$(MAGENTA)..."
+	@echo "$(MAGENTA)~COMPILING $(RST)$(BOLD)$(KERN_TARGET)$(RST)$(MAGENTA)...$(RST)"
 
 	@$(MAKE) -C $(KERNELDIR) M=$(PWD) modules
 	@echo "$(BOLD)$(GREEN)~ DONE ~$(RST)"
@@ -49,7 +51,7 @@ insert: default
 	@echo "\n$(BLUE)~INSERTING $(RST)$(BOLD)$(KERN_TARGET).ko$(RST)$(BLUE) INTO KERNEL $(RST)"
 	@sudo insmod $(KERN_TARGET).ko
 
-remove: 
+remove: clean
 	@echo "\n$(BLUE)~REMOVING $(RST)$(BOLD)$(KERN_TARGET).ko$(RST)$(BLUE) FROM KERNEL $(RST)"
 	@sudo rmmod $(KERN_TARGET)
 
