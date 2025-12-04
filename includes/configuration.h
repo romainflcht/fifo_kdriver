@@ -30,7 +30,7 @@
 #define FIFO_DEV_COUNT          3
 
 
-// Defines the total buffer size for each interface. 
+// Defines the total buffer size for each interface in bytes. 
 #define FIFO_BUFFER_SIZE        2048
 
 
